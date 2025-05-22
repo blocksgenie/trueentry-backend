@@ -1,10 +1,12 @@
-from fastapi import FastAPI, Query, Body
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Dict
+from datetime import datetime
+import uuid
 
 app = FastAPI()
 
-# Allow frontend to call the backend locally
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -13,61 +15,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mock in-memory data store
-groups_data = {
-    "group_1": {
-        "name": "Crypto Investors Club",
-        "credits": 32,
-        "verifiedToday": 12,
-        "unverified": 5,
-        "mode": "paid",
-    },
-    "group_2": {
-        "name": "Tech Startups",
-        "credits": 0,
-        "verifiedToday": 8,
-        "unverified": 3,
-        "mode": "trial",
-    }
-}
+# In-memory storage for groups
+clients_db: Dict[str, Dict] = {}
 
-verified_users_data = {
-    "group_1": [
-        {"username": "@john_doe", "date": "2025-05-20"},
-        {"username": "@sarah_crypto", "date": "2025-05-21"},
-    ],
-    "group_2": [
-        {"username": "@tech_guy", "date": "2025-05-21"},
-    ]
-}
+class GroupData(BaseModel):
+    id: str
+    name: str
+    credits: int
+    verifiedToday: int
+    unverified: int
+    mode: str  # "trial" or "paid"
 
+class UserLog(BaseModel):
+    telegram_username: str
+    verified: bool
+    timestamp: str
 
-@app.get("/groups")
+@app.get("/groups", response_model=List[GroupData])
 def get_groups():
-    result = []
-    for gid, info in groups_data.items():
-        result.append({
-            "id": gid,
-            "name": info["name"],
-            "credits": info["credits"],
-            "verifiedToday": info["verifiedToday"],
-            "unverified": info["unverified"],
-            "mode": info["mode"]
-        })
-    return result
+    return list(clients_db.values())
 
+@app.get("/logs/{group_id}", response_model=List[UserLog])
+def get_user_logs(group_id: str):
+    group = clients_db.get(group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return group.get("logs", [])
 
-@app.get("/verified-users")
-def get_verified_users(group_id: str = Query(..., description="Group ID")):
-    if group_id not in verified_users_data:
-        return JSONResponse(status_code=404, content={"detail": "Group not found"})
-    return {"group_id": group_id, "users": verified_users_data[group_id]}
+@app.post("/groups")
+def add_or_update_group(group: GroupData):
+    clients_db[group.id] = group.dict()
+    clients_db[group.id]["logs"] = clients_db[group.id].get("logs", [])
+    return {"message": "Group added/updated"}
 
+@app.post("/logs/{group_id}")
+def add_user_log(group_id: str, log: UserLog):
+    if group_id not in clients_db:
+        raise HTTPException(status_code=404, detail="Group not found")
+    clients_db[group_id].setdefault("logs", []).append(log.dict())
+    return {"message": "Log added"}
 
-@app.post("/issue-credits")
-def issue_credits(group_id: str = Body(...), amount: int = Body(...)):
-    if group_id not in groups_data:
-        return JSONResponse(status_code=404, content={"detail": "Group not found"})
-    
-    groups_data[group_id]["credits"] += amount
-    return {"message": f"Issued {amount} credits to {group_id}", "new_credits": groups_data[group_id]["credits"]}
+@app.post("/control/{group_id}/stop")
+def stop_bot(group_id: str):
+    if group_id in clients_db:
+        clients_db[group_id]["bot_active"] = False
+        return {"message": f"Bot for group '{group_id}' has been stopped."}
+    raise HTTPException(status_code=404, detail="Group not found")
+
+@app.post("/control/{group_id}/add_credits")
+def add_credits(group_id: str, credits: int = Query(..., ge=1)):
+    if group_id in clients_db:
+        clients_db[group_id]["credits"] += credits
+        return {"message": f"{credits} credits added to group '{group_id}'"}
+    raise HTTPException(status_code=404, detail="Group not found")
